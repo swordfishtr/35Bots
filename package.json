@@ -1,0 +1,15 @@
+{
+  "name": "kaya",
+  "version": "1.0.0",
+  "description": "!",
+  "main": "DiscordBot.js",
+  "scripts": {
+    "start": "node --experimental-sqlite DiscordBot.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "demirab1",
+  "license": "GPL-3.0-only",
+  "dependencies": {
+    "discord.js": "^14.17.3"
+  }
+}
