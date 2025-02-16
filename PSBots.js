@@ -52,65 +52,220 @@ module.exports = class {
 	}
 
 	connect() {
+		const connections = [];
 		for(const bot of this.bots) {
 			bot.ws = new WebSocket(this.getEntry());
 			bot.ws.bot = bot;
 			bot.ws.class = this;
-			bot.ws.addEventListener(E_MESSAGE, L_CONNECT, { signal: this.signal });
 			bot.ws.addEventListener(E_ERROR, L_ERROR, { signal: this.signal });
 			bot.ws.addEventListener(E_CLOSE, L_CLOSE, { once: true });
+			connections.push(awaitws(bot.ws, 30, (msgraw) => {
+				const msg = msgraw.slice(3, -2);
+
+				const data = msg.split("|");
+				if(data[1] !== "challstr") return;
+				return true;
+			})
+			.then((msgraw) => fetch("https://play.pokemonshowdown.com/~~showdown/action.php", {
+				method: 'POST',
+				headers: { "Content-Type": "application/x-www-form-urlencoded; encoding=UTF-8" },
+				body: qs.stringify({
+					act: "login",
+					name: bot.name,
+					pass: bot.pass,
+					challstr: msgraw.slice(13,-2)
+				})
+			}))
+			.then((res) => {
+				if(!res.ok) throw new Error(`Could not connect ${bot.name}.`);
+				return res.text();
+			})
+			.then((res) => JSON.parse(res.slice(1)))
+			.then((res) => {
+				if(
+					!res.actionsuccess
+					|| !res.curuser.loggedin
+					|| res.assertion.startsWith(";;")
+				) {
+					throw new Error(`Could not login ${bot.name}: ${res.assertion}`);
+				}
+
+				bot.ws.addEventListener("message", L_IDLE, { signal: this.signal });
+
+				bot.ws.send(`["|/trn ${bot.name},0,${res.assertion}"]`);
+			})
+			.catch((err) => {
+				this.shutdown();
+				throw err;
+			}));
 		}
+		return Promise.all(connections)
+		.then(() => "=== ALL CONNECTED ===");
 	}
 	
 	// USE PACKED TEAMS
 	battle(battle) {
 		// resolve into the battle url string since idk what else would be useful.
 		// maybe another promise with replay url.
-		return new Promise((res, rej) => {
-			if(
-				typeof battle !== "object"
-				|| !battle.message
-				|| !battle.chalcode
 
-				|| !battle.side1
-				|| !battle.side1.team
-				|| !battle.side1.usernames
-				|| battle.side1.confirmed
+		// Input type checks.
+		if(
+			typeof battle !== "object"
+			|| typeof battle.message !== "string"
+			|| typeof battle.chalcode !== "string"
 
-				|| !battle.side2
-				|| !battle.side2.team
-				|| !battle.side2.usernames
-				|| battle.side2.confirmed
-			) {
-				rej("Invalid data in argument.");
-				ctrl.abort();
-				return;
+			|| typeof battle.side1 !== "object"
+			|| typeof battle.side1.team !== "string"
+			|| !Array.isArray(battle.side1.usernames)
+			|| battle.side1.confirmed
+
+			|| typeof battle.side2 !== "object"
+			|| typeof battle.side2.team !== "string"
+			|| !Array.isArray(battle.side2.usernames)
+			|| battle.side2.confirmed
+		) {
+			throw new Error("Invalid data in argument.");
+		}
+
+		// Requesting player info for sanity checks.
+		for(const user of battle.side1.usernames) {
+			const msgraw = this.msgToRaw(`|/cmd userdetails ${user}`);
+			this.bots[0].ws.send(msgraw);
+		}
+		for(const user of battle.side2.usernames) {
+			const msgraw = this.msgToRaw(`|/cmd userdetails ${user}`);
+			this.bots[0].ws.send(msgraw);
+		}
+
+		// Awaiting player info.
+		return awaitws(this.bots[0].ws, 30, (msgraw) => {
+			const msg = msgraw.slice(3, -2);
+
+			const data = msg.split("|");
+			if(data[1] !== "queryresponse" || data[2] !== "userdetails") return;
+
+			//console.log(`${this.bot.name}: this log should not appear more than once in a row.`);
+
+			const details = JSON.parse(data[3].replaceAll("\\", ""));
+
+			if(!details) return "Unregistered username in queue.";
+
+			let foundUser = battle.side1.usernames.find((x) => x === details.name);
+			let foundSide;
+
+			if(foundUser) {
+				foundSide = battle.side1;
+			}
+			else {
+				foundUser = battle.side2.usernames.find((x) => x === details.name);
+				if(foundUser) {
+					foundSide = battle.side2;
+				}
 			}
 
-			// Notes:
-			// EventTarget can only have one event listener per function.
-			// EventTarget event listeners only get a message for their arguments.
-			// Bound functions can't remove their associated event listeners.
-	
-			const ctrl = new AbortController();
-			const bound = L_BATTLE1.bind(this.bots[0].ws, res, rej, ctrl, battle);
-			this.bots[0].ws.addEventListener(E_MESSAGE, bound, { signal: ctrl.signal });
-	
-			for(const user of battle.side1.usernames) {
-				const msgraw = msgToRaw(`|/cmd userdetails ${user}`);
-				this.bots[0].ws.send(msgraw);
-			}
-			for(const user of battle.side2.usernames) {
-				const msgraw = msgToRaw(`|/cmd userdetails ${user}`);
-				this.bots[0].ws.send(msgraw);
-			}
+			if(!foundUser) return;
 
-			// TODO: use numbers here, convert to error messages in bot.js
+			if(!details.rooms) return `User is offline: ${details.name}`;
 
-			setTimeout(() => {
-				rej("No response from showdown.");
-				ctrl.abort();
-			}, 30 * 1000);
+			foundSide.confirmed = foundUser;
+
+			if(!battle.side1.confirmed || !battle.side2.confirmed) return;
+
+			return true;
+		})
+		.then(() => {
+			// Sending challenge.
+			const msgraw0 = this.msgToRaw(`|/utm ${battle.side1.team}`);
+			const msgraw1 = this.msgToRaw(`|/utm ${battle.side2.team}`);
+			this.bots[0].ws.send(msgraw0);
+			this.bots[1].ws.send(msgraw1);
+
+			const msgraw2 = this.msgToRaw(`|/challenge ${this.bots[1].name}, ${battle.chalcode}`);
+			this.bots[0].ws.send(msgraw2);
+
+			// Awaiting challenge.
+			return awaitws(this.bots[1].ws, 30, (msgraw) => {
+				const msg = msgraw.slice(3, -2);
+
+				const data = msg.split("|");
+				if(
+					data[1] !== "pm"
+					|| data[2].slice(1) !== this.bots[0].name
+					|| data[3].slice(1) !== this.bots[1].name
+					|| !data[4].startsWith("/challenge ")
+				) {
+					return;
+				}
+
+				return true;
+			});
+		})
+		.then(() => {
+			// Accepting challenge
+			const msgraw0 = this.msgToRaw(`|/accept ${this.bots[0].name}`);
+			this.bots[1].ws.send(msgraw0);
+
+			// Awaiting battle room.
+			return awaitws(this.bots[0].ws, 30, (msgraw) => {
+				const msg = msgraw.slice(3, -2);
+				const [ room, data_ ] = msg.split("\\n");
+
+				if(!data_) return;
+
+				const data = data_.split("|");
+
+				if(data[1] !== "init" || data[2] !== "battle") return;
+
+				return true;
+			});
+		})
+		.then((msgraw) => {
+			// Battle on-start actions.
+			const msg = msgraw.slice(3, -2);
+			const [ room, data_ ] = msg.split("\\n");
+
+			const msgraw0 = this.msgToRaw(`${room.slice(1)}|${battle.message}`);
+			const msgraw1 = this.msgToRaw(`${room.slice(1)}|/timer on`);
+			const msgraw2 = this.msgToRaw(`${room.slice(1)}|/leavebattle`);
+			const msgraw3 = this.msgToRaw(`${room.slice(1)}|/addplayer ${battle.side1.confirmed}, p1`);
+			const msgraw4 = this.msgToRaw(`${room.slice(1)}|/addplayer ${battle.side2.confirmed}, p2`);
+			const msgraw5 = this.msgToRaw(`|/noreply /leave ${room.slice(1)}`);
+
+			this.bots[0].ws.send(msgraw0);
+			this.bots[0].ws.send(msgraw1);
+			this.bots[1].ws.send(msgraw1);
+			this.bots[0].ws.send(msgraw2);
+			this.bots[1].ws.send(msgraw2);
+			this.bots[0].ws.send(msgraw3);
+			this.bots[1].ws.send(msgraw4);
+			this.bots[1].ws.send(msgraw5);
+
+			
+			// Return the battle URL and a promise for the corresponding replay.
+			return {
+				room: `https://play.pokemonshowdown.com/${room.slice(1)}`,
+				replay: awaitws(this.bots[0].ws, 60 * 60, (msgraw) => {
+					// Awaiting battle end.
+					const msg = msgraw.slice(3, -2);
+					const data = msg.split("\\n").pop()?.split("|")?.[1];
+					if(data !== "win") return;
+					return true;
+				})
+				.then(() => {
+					const msgraw0 = this.msgToRaw(`${room.slice(1)}|/savereplay`);
+					this.bots[0].ws.send(msgraw0);
+					return awaitws(this.bots[0].ws, 60, (msgraw) => {
+						const msg = msgraw.slice(3, -2);
+						const test = new RegExp(`^|popup||html|<p>Your replay has been uploaded!.+?${room.slice(1)}`);
+						if(!test.test(msg)) return;
+						return true;
+					});
+				})
+				.then((msgraw) => {
+					this.bots[0].ws.send(msgraw5);
+					return /href="(.+?)"/.exec(msgraw)?.[1] ?? "this should not have happened";
+				})
+			};
 		});
 	}
 
@@ -128,43 +283,49 @@ module.exports = class {
 		return `wss://sim3.psim.us/showdown/${r1}/${r2}/websocket`;
 	}
 
+	msgToRaw(msg) {
+		if(typeof msg !== "string") throw new Error("Message must be a string.");
+		return `["${msg ?? ""}"]`;
+	}
+
 	test() {
 
 	}
 
 };
 
-function msgToRaw(msg) {
-	if(typeof msg !== "string") throw new Error("Message must be a string.");
-	return `["${msg ?? ""}"]`;
-}
-
 /**
  * Sets up a unique event listener on the websocket and applies incoming messages on the predicate. The listener is removed after this is settled.
  * 
  * Predicate return values:
- * true => resolve with message.
- * false => reject with message.
+ * true => resolve with msgraw
+ * string => reject with { reason, msgraw }
  * else => keep listening.
  * 
  * Usage:
- * Send ws commands -> await this -> repeat.
+ * Send ws commands -> await this -> check for reason in output -> repeat.
  * 
  * @param {WebSocket} ws - Don't confuse which bots websocket you're using.
  * @param {(msgraw: string) => boolean | any} predicate - Settle condition.
  * @param {number} timer - reject after this amount of time in seconds.
+ * @returns {Promise<string>}
  */
 function awaitws(ws, timer, predicate) {
+	// Notes:
+	// EventTarget can only have one event listener per function.
+	// EventTarget event listeners get a message for their arguments and nothing else.
+	// Bound functions can't remove their associated event listeners.
 	return new Promise((res, rej) => {
 		const ctrl = new AbortController();
 		ws.addEventListener(E_MESSAGE, (msgraw) => {
-			if(predicate(msgraw) === false) {
-				rej(msgraw);
+			const reason = predicate(msgraw.data);
+			if(reason === true) {
+				res(msgraw.data);
 				ctrl.abort();
 				return;
 			}
-			if(predicate(msgraw) === true) {
-				res(msgraw);
+			if(typeof reason === "string") {
+				rej({ reason, msgraw: msgraw.data });
 				ctrl.abort();
 				return;
 			}
@@ -187,193 +348,10 @@ function L_ERROR(err) {
 	this.class.shutdown();
 }
 
-// Await challstr.
-function L_CONNECT(msgraw) {
-	const msg = msgraw.data.slice(3, -2);
-
-	const data = msg.split("|");
-	if(data[1] !== "challstr") return;
-
-	return fetch("https://play.pokemonshowdown.com/~~showdown/action.php", {
-		method: 'POST',
-		headers: { "Content-Type": "application/x-www-form-urlencoded; encoding=UTF-8" },
-		body: qs.stringify({
-			act: "login",
-			name: this.bot.name,
-			pass: this.bot.pass,
-			challstr: msg.slice(10)
-		})
-	})
-	.then((res) => {
-		if(!res.ok) throw new Error(`Could not connect ${this.bot.name}.`);
-		return res.text();
-	})
-	.then((res) => JSON.parse(res.slice(1)))
-	.then((res) => {
-		if(
-			!res.actionsuccess
-			|| !res.curuser.loggedin
-			|| res.assertion.startsWith(";;")
-		) {
-			throw new Error(`Could not login ${this.bot.name}: ${res.assertion}`);
-		}
-
-		this.removeEventListener("message", L_CONNECT);
-		this.addEventListener("message", L_IDLE, { signal: this.class.signal });
-
-		this.send(`["|/trn ${this.bot.name},0,${res.assertion}"]`);
-	})
-	.catch((err) => {
-		console.error(err);
-	});
-}
-
 function L_IDLE(msgraw) {
 	console.log("");
 	console.log(this.bot.name + ":");
 	console.log(msgraw.data);
-}
-
-
-// Check player availability.
-// `this` is likely class.bots[0].ws
-function L_BATTLE1(res, rej, controller, battle, msgraw) {
-	const msg = msgraw.data.slice(3, -2);
-
-	const data = msg.split("|");
-	if(data[1] !== "queryresponse" || data[2] !== "userdetails") return;
-
-	//console.log(`${this.bot.name}: this log should not appear more than once in a row.`);
-
-	/**
-	 * battle is
-	 * {
-	 * message: string,
-	 * chalcode: string,
-	 * side1: { team: string, usernames: string[] },
-	 * side2: { team: string, usernames: string[] },
-	 * }
-	 */
-
-	const details = JSON.parse(data[3].replaceAll("\\", ""));
-
-	// Should never happen.
-	if(!details) {
-		rej("Unregistered username in queue.");
-		controller.abort();
-		return;
-	}
-
-	let foundUser = battle.side1.usernames.find((x) => x === details.name);
-	let foundSide;
-
-	if(foundUser) {
-		foundSide = battle.side1;
-	}
-	else {
-		foundUser = battle.side2.usernames.find((x) => x === details.name);
-		if(foundUser) {
-			foundSide = battle.side2;
-		}
-	}
-
-	// Not relevant to this battle.
-	if(!foundUser) return;
-
-	if(!details.rooms) {
-		rej(`User is offline: ${details.name}`);
-		controller.abort();
-		return;
-	}
-
-	foundSide.confirmed = foundUser;
-
-	if(!battle.side1.confirmed || !battle.side2.confirmed) return;
-
-	// All set! Starting battle.
-
-	// TODO: INSTEAD OF PROCEEDING, ADD BATTLE TO QUEUE
-
-	controller.abort();
-
-	const bots = this.class.bots;
-
-	const msgraw0 = msgToRaw(`|/utm ${battle.side1.team}`);
-	const msgraw1 = msgToRaw(`|/utm ${battle.side2.team}`);
-	bots[0].ws.send(msgraw0);
-	bots[1].ws.send(msgraw1);
-
-	const ctrl = new AbortController();
-	const bound = L_BATTLE2.bind(bots[1].ws, res, rej, ctrl, battle);
-	bots[1].ws.addEventListener(E_MESSAGE, bound, { signal: ctrl.signal });
-
-	const msgraw2 = msgToRaw(`|/challenge ${bots[1].name}, ${battle.chalcode}`);
-	bots[0].ws.send(msgraw2);
-
-	setTimeout(() => {
-		rej("No response from showdown.");
-		ctrl.abort();
-	}, 30 * 1000);
-	
-}
-
-// Await challenge.
-// `this` is likely class.bots[1].ws
-function L_BATTLE2(res, rej, controller, battle, msgraw) {
-	const msg = msgraw.data.slice(3, -2);
-
-	const data = msg.split("|");
-	if(
-		data[1] !== "pm"
-		|| data[2].slice(1) !== this.class.bots[0].name
-		|| data[3].slice(1) !== this.class.bots[1].name
-		|| !data[4].startsWith("/challenge ")
-	) {
-		return;
-	}
-
-	controller.abort();
-
-	const bots = this.class.bots;
-
-	const msgraw0 = msgToRaw(`|/accept ${this.class.bots[0].name}`);
-	bots[1].ws.send(msgraw0);
-
-	const ctrl = new AbortController();
-	const bound = L_BATTLE3.bind(bots[0].ws, res, rej, ctrl, battle);
-	bots[0].ws.addEventListener(E_MESSAGE, bound, { signal: ctrl.signal });
-
-	setTimeout(() => {
-		rej("No response from showdown.");
-		ctrl.abort();
-	}, 30 * 1000);
-}
-
-// Await battle start.
-// `this` is likely class.bots[0].ws
-function L_BATTLE3(res, rej, controller, battle, msgraw) {
-	const msg = msgraw.data.slice(3, -2);
-
-	const [ room, data_ ] = msg.split("\\n");
-
-	if(!data_) return;
-
-	const data = data_.split("|");
-
-	if(data[1] !== "init" || data[2] !== "battle") return;
-
-	controller.abort();
-	res(`https://play.pokemonshowdown.com/${room.slice(1)}`);
-
-	console.log(`Started battle: https://play.pokemonshowdown.com/${room.slice(1)}`);
-
-	const msgraw0 = msgToRaw(`${room.slice(1)}|/timer on`);
-	const msgraw1 = msgToRaw(`${room.slice(1)}|${battle.message}`);
-
-	const bots = this.class.bots;
-	bots[0].ws.send(msgraw0);
-	bots[1].ws.send(msgraw0);
-	bots[0].ws.send(msgraw1);
 }
 
 /**
@@ -391,4 +369,22 @@ function L_BATTLE3(res, rej, controller, battle, msgraw) {
  * |/friends viewnotifs
  * 
  * |pm| comeheavysleep| demirab1|/challenge gen9nfe||You're invited to join a battle (with )||
+ */
+
+/**
+ * << >battle-gen9randombattle-2301526504
+|
+|t:|1739661832
+|move|p1a: Iron Jugulis|Dark Pulse|p2a: Meganium
+|-crit|p2a: Meganium
+|-damage|p2a: Meganium|0 fnt
+|faint|p2a: Meganium
+|
+|win|comeheavysleep
+ */
+
+/**
+ * >> battle-gen9randombattle-2301526504|/savereplay
+ * 
+ * << |popup||html|<p>Your replay has been uploaded! It's available at:</p><p> <a class="no-panel-intercept" href="https://replay.pokemonshowdown.com/gen9randombattle-2301526504" target="_blank">https://replay.pokemonshowdown.com/gen9randombattle-2301526504</a> <copytext value="https://replay.pokemonshowdown.com/gen9randombattle-2301526504">Copy</copytext>
  */
