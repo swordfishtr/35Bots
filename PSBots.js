@@ -2,8 +2,8 @@
  * PSBots.js
  * 
  * This is an interface for a group of Pokemon Showdown bots, usually 2 of them.
- * They can start battles with provided teams and return invite links for each side.
- * The end result is a matchmaking system outside of PS, for a format to be played on PS.
+ * They can start battles with provided teams and invite specified players in their place.
+ * The end result is a matchmaking system outside of PS, for formats to be played on PS.
  * 
  * @author demi
  */
@@ -31,19 +31,18 @@ module.exports = class {
 	constructor(auth) {
 		if(
 			!Array.isArray(auth)
+			|| auth.length === 0
 			|| auth.some((x) => !x || !x.name || !x.pass || x.ws)
 		) {
 			throw new Error("Invalid authentication data.");
 		}
 
 		this.bots = auth;
-		this.#abort = new AbortController();
 	}
 
 	shutdown(reason) {
 		if(this.bots.some((x) => !x.ws) || this.#abort.signal.aborted) {
-			console.log("Shutdown attempted while not connected.");
-			return;
+			throw new Error("Shutdown attempted while not connected.");
 		}
 		for(const { ws } of this.bots) {
 			ws.close();
@@ -52,6 +51,11 @@ module.exports = class {
 	}
 
 	connect() {
+		// If connected, reconnect.
+		try { this.shutdown(); }
+		catch {}
+
+		this.#abort = new AbortController();
 		const connections = [];
 		for(const bot of this.bots) {
 			bot.ws = new WebSocket(this.getEntry());
@@ -102,12 +106,16 @@ module.exports = class {
 		return Promise.all(connections)
 		.then(() => "=== ALL CONNECTED ===");
 	}
+
+	/**
+	 * true: connected, false: closed
+	 */
+	state() {
+		return this.bots.some((bot) => bot.ws && bot.ws.readyState !== 3);
+	}
 	
 	// USE PACKED TEAMS
 	battle(battle) {
-		// resolve into the battle url string since idk what else would be useful.
-		// maybe another promise with replay url.
-
 		// Input type checks.
 		if(
 			typeof battle !== "object"
@@ -337,7 +345,7 @@ function awaitws(ws, timer, predicate) {
 	});
 }
 
-// Listener functions (`this` is WebSocket)
+// Generic listener functions (`this` is WebSocket)
 
 function L_CLOSE() {
 	console.log(`=== SHUTDOWN ${this.bot.name} ===`);

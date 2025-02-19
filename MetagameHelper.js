@@ -8,13 +8,13 @@ const { Dex, Teams, toID } = require("./pokemon-showdown/dist/sim/index.js");
 module.exports = class {
 
 	#metagamesObject = {};
-	get memoryObject() {
+	get metagamesObject() {
 		return this.#metagamesObject;
 	}
 
 	// does not include pokemon; just a convenient list of metagames.
 	#metagamesArray = [];
-	get memoryArray() {
+	get metagamesArray() {
 		return this.#metagamesArray;
 	}
 
@@ -23,11 +23,16 @@ module.exports = class {
 	#FEATURE_BATTLEFACTORY = false;
 
 	#metagamesBF = [];
-	get memoryBF() {
+	get metagamesBF() {
 		return this.#metagamesBF;
 	}
 
 	#generatorBF = null;
+
+	#psbots = null;
+	get psbots() {
+		return this.#psbots;
+	}
 
 	constructor(bf) {
 		this.#FEATURE_BATTLEFACTORY = Boolean(bf);
@@ -51,6 +56,17 @@ module.exports = class {
 		try {
 			const bf = Dex.formats.get("gen9battlefactory");
 			this.#generatorBF = Teams.getGenerator(bf);
+		}
+		catch(err) {
+			errors.push(err);
+		}
+
+		try {
+			const psbots = require("./PSBots.js");
+			const configPath = path.join(__dirname, "config.json");
+			const { psAuth } = require(configPath);
+			this.#psbots = new psbots(psAuth);
+			await this.#psbots.connect();
 		}
 		catch(err) {
 			errors.push(err);
@@ -618,6 +634,11 @@ module.exports = class {
 		return metagame;
 	}
 
+	getRandomBF() {
+		const index = Math.floor(Math.random() * this.#metagamesBF.length);
+		return this.#metagamesBF[index];
+	}
+
 	/**
 	 * 35 Factory team generator
 	 * 
@@ -627,13 +648,34 @@ module.exports = class {
 	 * Manually set generator.factoryTier
 	 */
 	generateTeam(format, pack) {
-		/* const index = Math.floor(Math.random() * this.#metagamesBF.length);
-		const format = this.#metagamesBF[index]; */
-
 		if(!this.#metagamesBF.includes(format)) throw new Error("Invalid format");
 
 		this.#generatorBF.factoryTier = format;
 		const team = this.#generatorBF.getTeam();
 		return pack ? Teams.pack(team) : team;
 	}
+
+	// Check battle, fill if missing props, then start.
+	generateBattle(battle) {
+		// Currently we can not create non-specific invites, so only proceed if provided usernames.
+		// {side1:{usernames:["demirab1"]},side2:{usernames:["comeheavysleep"]}}
+		if(!(battle?.side1?.usernames?.length > 0) || !(battle?.side2?.usernames?.length > 0)) {
+			throw new Error("Missing battle data.");
+		}
+
+		battle.format ??= this.getRandomBF();
+
+		const [ group, name ] = battle.format.split("/");
+		const ref = this.#metagamesObject?.[group]?.[name]?.[0];
+
+		battle.chalcode ??= ref?.code?.slice(10) ?? "gen9nationaldex35pokes @@@ +nduber, +ndag, +ndou, +nduubl, +nduu, +ndrubl, +ndru, +ndnfe, +ndlc";
+
+		battle.message ??= `35 Factory Format: ${ref?.name ?? "idk"}`;
+
+		battle.side1.team ??= this.generateTeam(battle.format, true);
+		battle.side2.team ??= this.generateTeam(battle.format, true);
+
+		return this.#psbots.battle(battle);
+	}
+
 };
