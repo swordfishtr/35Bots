@@ -21,16 +21,17 @@
 
 const path = require("node:path");
 const { Client, Events, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require("discord.js");
-const MetagameHelper = require("./MetagameHelper.js");
 
 const configPath = path.join(__dirname, "config.json");
 const cfg = require(configPath);
 
+const mhPath = path.join(__dirname, "MetagameHelper.js");
+const MetagameHelper = require(mhPath);
+const mh = new MetagameHelper(false);
+const INIT_MH = mh.init();
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const rest = new REST().setToken(cfg.token);
-
-const mh = new MetagameHelper();
-const INIT_MH = mh.init();
 
 const DISCORD_MAX_OPTIONS = 25;
 
@@ -40,7 +41,7 @@ client.on(Events.InteractionCreate, (interaction) => {
 	if(interaction.isAutocomplete()) { // these are only suggestions!
 		const input = interaction.options.getFocused();
 		const regex = new RegExp(input, "i");
-		const matches = mh.memoryArray
+		const matches = mh.metagamesArray
 		.filter((x) => regex.test(x))
 		.slice(0, DISCORD_MAX_OPTIONS)
 		.map((x) => ({ name: x, value: x }));
@@ -78,14 +79,14 @@ client.on(Events.InteractionCreate, (interaction) => {
 		case "memory": {
 			let buf = "";
 			buf += "List of loaded metagames:\n";
-			buf += mh.memoryArray.join("\n") || "None!";
+			buf += mh.metagamesArray.join("\n") || "None!";
 			return interaction.reply(buf);
 		}
 
 		case "meta-to-chalcode": {
 			const [ group, meta ] = interaction.options.getString("metagame").split("/");
 			
-			const target = mh.memoryObject[group]?.[meta];
+			const target = mh.metagamesObject[group]?.[meta];
 			if(!target) return interaction.reply("?");
 
 			const list = target.filter((x) => !x.header).map((x) => x.value);

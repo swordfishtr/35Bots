@@ -2,7 +2,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("child_process");
-//const { DatabaseSync } = require("node:sqlite");
+const { DatabaseSync, StatementSync } = require("node:sqlite");
 const { Dex, Teams, toID } = require("./pokemon-showdown/dist/sim/index.js");
 
 module.exports = class {
@@ -20,7 +20,11 @@ module.exports = class {
 
 	#gametypes = {};
 
-	#FEATURE_BATTLEFACTORY = false;
+	/** @type {DatabaseSync} */
+	#db = null;
+
+	/** @type {Object.<string, StatementSync>} */
+	stmt = null;
 
 	#metagamesBF = [];
 	get metagamesBF() {
@@ -35,7 +39,30 @@ module.exports = class {
 	}
 
 	constructor(bf) {
-		this.#FEATURE_BATTLEFACTORY = Boolean(bf);
+		this.#prepareDB();
+		if(bf) {
+			const bf = Dex.formats.get("gen9battlefactory");
+			this.#generatorBF = Teams.getGenerator(bf);
+		}
+	}
+
+	#prepareDB() {
+		const dbpath = path.join(__dirname, "players.db");
+		const stpath = path.join(__dirname, "statements.sql");
+		this.#db = new DatabaseSync(dbpath);
+		const statements = fs.readFileSync(stpath, { encoding: "utf-8" });
+		this.stmt = {};
+		const interpreter = /---(.+?)\n(.+?);/gs;
+		while(true) {
+			const i = interpreter.exec(statements);
+			if(!i) break;
+			if(i[1] === "STARTUP") {
+				this.#db.exec(i[2]);
+			}
+			else {
+				this.stmt[i[1]] = this.#db.prepare(i[2]);
+			}
+		}
 	}
 
 	/**
@@ -51,15 +78,7 @@ module.exports = class {
 		const errors_load = await this.loadMetagames();
 		errors.push(...errors_load);
 
-		if(!this.#FEATURE_BATTLEFACTORY) return errors;
-
-		try {
-			const bf = Dex.formats.get("gen9battlefactory");
-			this.#generatorBF = Teams.getGenerator(bf);
-		}
-		catch(err) {
-			errors.push(err);
-		}
+		if(!this.#generatorBF) return errors;
 
 		try {
 			const psbots = require("./PSBots.js");
